@@ -103,9 +103,13 @@ public class NoteRequest {
         ArrayList<String> tagList = new ArrayList<>();
         JsonObject noteObject = noteElement.getAsJsonObject();
 
+        String field = null;
+        String value = null;
         JsonObject fieldsObject = noteObject.get("fields").getAsJsonObject();
-        String field = fieldsObject.keySet().toArray()[0].toString();
-        String value = fieldsObject.get(field).getAsString();
+        if (!fieldsObject.keySet().isEmpty()) {
+            field = fieldsObject.keySet().toArray()[0].toString();
+            value = fieldsObject.get(field).getAsString();
+        }
 
         String modelName = noteObject.get("modelName").getAsString();
         String deckName = noteObject.get("deckName").getAsString();
