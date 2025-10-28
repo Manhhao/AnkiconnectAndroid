@@ -34,8 +34,8 @@ public class IntegratedAPI {
 
     //From anki-connect repo
     private static final String CAN_ADD_ERROR_DUPLICATE = "cannot create note because it is a duplicate";
-    private static final String CAN_ADD_ERROR_EMPTY_MODEL = "model was not found: {}";
-    private static final String CAN_ADD_ERROR_EMPTY_DECK_NAME = "cannot create note because it is empty";
+    private static final String CAN_ADD_ERROR_EMPTY_MODEL = "model was not found: ";
+    private static final String CAN_ADD_ERROR_EMPTY_DECK_NAME = "deck was not found: ";
     private static final String CAN_ADD_ERROR_EMPTY = "cannot create note because it is empty";
     private static final String CAN_ADD_ERROR_UNKNOWN = "cannot create note for unknown reason";
     public IntegratedAPI(Context context) {
@@ -73,7 +73,7 @@ public class IntegratedAPI {
         }
     }
 
-    private CanAddWithError canAddNodeCheck(NoteRequest note) throws Exception {
+    private CanAddWithError canAddNoteCheck(NoteRequest note) throws Exception {
         final String[] NOTE_PROJECTION = {
                 FlashCardsContract.Note._ID,
                 FlashCardsContract.Note.CSUM
@@ -106,7 +106,7 @@ public class IntegratedAPI {
         }
 
         // Ensure not has valid field name and field value
-        // If users have not set up Yomitan for any of the default formats, these values will be null
+        // If users have not set up any of the default card formats in Yomitan, these values will be null
         if (note.getFieldName() == null && note.getFieldValue() == null) {
             return new CanAddWithError(false, CAN_ADD_ERROR_EMPTY);
         }
@@ -136,7 +136,7 @@ public class IntegratedAPI {
 
         selectionQuery.append(String.format(
                 Locale.US,
-                "%s = %s",
+                "%s = %d",
                 FlashCardsContract.Note.CSUM,
                 checksum
         ));
@@ -166,7 +166,7 @@ public class IntegratedAPI {
 
     private boolean canAddNote(NoteRequest note) {
         try {
-            return canAddNodeCheck(note).isCanAdd();
+            return canAddNoteCheck(note).isCanAdd();
         } catch (Exception e) {
             return false;
         }
@@ -250,7 +250,7 @@ public class IntegratedAPI {
 
     private CanAddWithError canAddNoteWithErrorDetail(NoteRequest note) {
         try {
-            return canAddNodeCheck(note);
+            return canAddNoteCheck(note);
         } catch (Exception e) {
             return new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN);
         }
