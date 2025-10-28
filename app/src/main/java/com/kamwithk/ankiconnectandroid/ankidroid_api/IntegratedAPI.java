@@ -239,7 +239,8 @@ public class IntegratedAPI {
                 }
             }
         } catch (Exception e) {
-            // todo: cancel batch?
+            // assume no duplicates if query fails
+            return Collections.emptyMap();
         }
         return duplicateNotes;
     }
