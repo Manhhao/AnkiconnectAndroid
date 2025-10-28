@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static com.ichi2.anki.api.AddContentApi.READ_WRITE_PERMISSION;
 
@@ -32,7 +33,11 @@ public class IntegratedAPI {
     private final AddContentApi api; // TODO: Combine all API classes???
 
     //From anki-connect repo
-    private static final String CAN_ADD_ERROR_REASON = "cannot create note because it is a duplicate";
+    private static final String CAN_ADD_ERROR_DUPLICATE = "cannot create note because it is a duplicate";
+    private static final String CAN_ADD_ERROR_EMPTY_MODEL = "model was not found: {}";
+    private static final String CAN_ADD_ERROR_EMPTY_DECK_NAME = "cannot create note because it is empty";
+    private static final String CAN_ADD_ERROR_EMPTY = "cannot create note because it is empty";
+    private static final String CAN_ADD_ERROR_UNKNOWN = "cannot create note for unknown reason";
     public IntegratedAPI(Context context) {
         this.context = context;
 
@@ -68,28 +73,31 @@ public class IntegratedAPI {
         }
     }
 
-    public ArrayList<Boolean> canAddNotes(ArrayList<NoteRequest> notesToTest) throws Exception {
-        final String[] NOTE_PROJECTION = {FlashCardsContract.Note._ID, FlashCardsContract.Note.CSUM};
+    private CanAddWithError canAddNodeCheck(NoteRequest note) throws Exception {
+        final String[] NOTE_PROJECTION = {
+                FlashCardsContract.Note._ID,
+                FlashCardsContract.Note.CSUM
+        };
 
-        if(notesToTest.isEmpty()) {
-            return new ArrayList<>();
+        NoteRequest.NoteOptions noteOptions = note.getOptions();
+        String modelName = note.getModelName();
+
+        if (modelName == null || modelName.isEmpty()) {
+            return new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_MODEL);
         }
 
-        ArrayList<Long> checksums = new ArrayList<>(notesToTest.size());
-        ArrayList<Boolean> canAddNote = new ArrayList<>(notesToTest.size());
-        NoteRequest.NoteOptions noteOptions = notesToTest.get(0).getOptions();
-
-        // If duplicate scope is "deck" or "deck root", we need to get extra information to figure out if DID matches.
-        // If duplicate scope is "deck root" we need to include children, noteOptions.getDeckName() will not be null
         HashSet<Long> deckIds = new HashSet<>();
         Map<String, Long> deckNamesToIds = deckAPI.deckNamesAndIds();
         String deckName = noteOptions.getDeckName();
-        if(deckName == null) {
+
+        if (deckName == null) {
             // Deck, not root
-            deckName = notesToTest.get(0).getDeckName();
+            deckName = note.getDeckName();
+            if (deckName == null || deckName.isEmpty()) {
+                return new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_DECK_NAME);
+            }
             deckIds.add(deckNamesToIds.get(deckName));
-        }
-        else {
+        } else {
             for (String name : deckNamesToIds.keySet()) {
                 if (name.contains(deckName)) {
                     deckIds.add(deckNamesToIds.get(name));
@@ -97,67 +105,75 @@ public class IntegratedAPI {
             }
         }
 
-        for (NoteRequest note : notesToTest) {
-            String key = note.getFieldValue();
-            checksums.add(Utility.getFieldChecksum(key));
+        // Ensure not has valid field name and field value
+        // If users have not set up Yomitan for any of the default formats, these values will be null
+        if (note.getFieldName() == null && note.getFieldValue() == null) {
+            return new CanAddWithError(false, CAN_ADD_ERROR_EMPTY);
         }
+
+        long checksum = Utility.getFieldChecksum(note.getFieldValue());
 
         // If duplicates are allowed, just need to see if they are valid notes (checksum != 0)
         if (noteOptions.isAllowDuplicate()) {
-            for (long checksum: checksums) {
-                canAddNote.add(checksum != 0);
+            if (checksum == 0) {
+                return new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN);
             }
-            return canAddNote;
+            return new CanAddWithError(true, null);
         }
-
-        // Grabbing the note options and model for the first note and assuming the rest are the same.
-        // This is true for yomitan but might not be for other applications.
-        String modelName = notesToTest.get(0).getModelName();
 
         Map<String, Long> modelNameToId = modelAPI.modelNamesAndIds(0);
         Long modelId = modelNameToId.get(modelName);
 
-        String selectionQuery = "";
+        StringBuilder selectionQuery = new StringBuilder();
         if (!noteOptions.isCheckAllModels()) {
-            selectionQuery = String.format(
+            selectionQuery.append(String.format(
                     Locale.US,
-                    "%s=%d and ",
+                    "%s = %d and ",
                     FlashCardsContract.Note.MID,
                     modelId
-            );
+            ));
         }
-        selectionQuery = selectionQuery + String.format(
-                Locale.US,
-                "%s in (%s)",
-                FlashCardsContract.Note.CSUM,
-                TextUtils.join(",", checksums)
-        );
 
-        final Cursor cursor = context.getContentResolver().query(
+        selectionQuery.append(String.format(
+                Locale.US,
+                "%s = %s",
+                FlashCardsContract.Note.CSUM,
+                checksum
+        ));
+
+        try (Cursor cursor = context.getContentResolver().query(
                 FlashCardsContract.Note.CONTENT_URI_V2,
                 NOTE_PROJECTION,
-                selectionQuery,
+                selectionQuery.toString(),
                 null,
                 null
-        );
-
-        if (cursor == null || cursor.getCount() == 0) {
-            for (int i = 0; i < notesToTest.size(); i++) {
-                canAddNote.add(true);
+        )) {
+            if (cursor != null && cursor.getCount() != 0) {
+                LinkedHashSet<Long> queryChecksums = findChecksumsInQuery(
+                        cursor,
+                        noteOptions.getDuplicateScope().equals("deck"),
+                        deckIds
+                );
+                if (queryChecksums.contains(checksum)) {
+                    return new CanAddWithError(false, CAN_ADD_ERROR_DUPLICATE);
+                }
             }
+            return new CanAddWithError(true, null);
+        } catch (Exception e) {
+            return new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN);
         }
-        else {
-            LinkedHashSet<Long> queryChecksums = findChecksumsInQuery(
-                    cursor,
-                    noteOptions.getDuplicateScope().equals("deck"), deckIds);
+    }
 
-            for (int i = 0; i < checksums.size(); i++) {
-                boolean isChecksumFound = !queryChecksums.contains(checksums.get(i));
-                canAddNote.add(isChecksumFound);
-            }
+    private boolean canAddNote(NoteRequest note) {
+        try {
+            return canAddNodeCheck(note).isCanAdd();
+        } catch (Exception e) {
+            return false;
         }
+    }
 
-        return canAddNote;
+    public List<Boolean> canAddNotes(ArrayList<NoteRequest> notesToTest) {
+        return notesToTest.stream().map(this::canAddNote).collect(Collectors.toList());
     }
 
     private LinkedHashSet<Long> findChecksumsInQuery(Cursor cursor, boolean isDuplicateScopeDeck, Set<Long> deckIds) {
@@ -232,22 +248,16 @@ public class IntegratedAPI {
         }
     }
 
-    public List<CanAddWithError> canAddNotesWithErrorDetail(ArrayList<NoteRequest> notesToTest) throws Exception {
-        List<CanAddWithError> canAddWithErrorList = new ArrayList<>();
-        List<Boolean> canAddList = canAddNotes(notesToTest);
-
-        for (boolean canAdd : canAddList) {
-            CanAddWithError canAddWithError;
-            if (canAdd) {
-                canAddWithError = new CanAddWithError(true, null);
-            }
-            else {
-                canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_REASON);
-            }
-            canAddWithErrorList.add(canAddWithError);
+    private CanAddWithError canAddNoteWithErrorDetail(NoteRequest note) {
+        try {
+            return canAddNodeCheck(note);
+        } catch (Exception e) {
+            return new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN);
         }
+    }
 
-        return canAddWithErrorList;
+    public List<CanAddWithError> canAddNotesWithErrorDetail(ArrayList<NoteRequest> notesToTest) {
+        return notesToTest.stream().map(this::canAddNoteWithErrorDetail).collect(Collectors.toList());
     }
 
     /**
