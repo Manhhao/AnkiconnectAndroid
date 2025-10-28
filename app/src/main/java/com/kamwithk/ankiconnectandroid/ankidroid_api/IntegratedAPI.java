@@ -116,7 +116,9 @@ public class IntegratedAPI {
     }
 
     public List<Boolean> canAddNotes(List<NoteRequest> notes) {
-        return canAddNotesWithErrorDetail(notes).stream().map(CanAddWithError::isCanAdd).collect(Collectors.toList());
+        return canAddNotesWithErrorDetail(notes).stream()
+                .map(CanAddWithError::isCanAdd)
+                .collect(Collectors.toList());
     }
 
     public List<CanAddWithError> canAddNotesWithErrorDetail(List<NoteRequest> notes) {
@@ -130,9 +132,9 @@ public class IntegratedAPI {
             deckNamesToIds = deckAPI.deckNamesAndIds();
             modelNameToId = modelAPI.modelNamesAndIds(0);
         } catch (Exception e) {
-            ArrayList<CanAddWithError> err = new ArrayList<>();
-            notes.forEach(n -> err.add(new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN)));
-            return err;
+            return notes.stream()
+                    .map(n -> new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN))
+                    .collect(Collectors.toList());
         }
 
         List<NoteInfo> noteInfos = new ArrayList<>(notes.size());
@@ -146,7 +148,9 @@ public class IntegratedAPI {
         }
 
         if (checksums.isEmpty()) {
-            return noteInfos.stream().map(n -> n.canAddWithError).collect(Collectors.toList());
+            return noteInfos.stream()
+                    .map(n -> n.canAddWithError)
+                    .collect(Collectors.toList());
         }
 
         Map<Long, Set<DuplicateNote>> duplicateNotes = getDuplicateNotes(checksums);
@@ -159,7 +163,9 @@ public class IntegratedAPI {
             duplicateCheck(noteInfo, duplicateNotes);
         }
 
-        return noteInfos.stream().map(ninfo -> ninfo.canAddWithError).collect(Collectors.toList());
+        return noteInfos.stream()
+                .map(ninfo -> ninfo.canAddWithError)
+                .collect(Collectors.toList());
     }
 
     private void duplicateCheck(NoteInfo noteInfo, Map<Long, Set<DuplicateNote>> duplicateNotes) {
