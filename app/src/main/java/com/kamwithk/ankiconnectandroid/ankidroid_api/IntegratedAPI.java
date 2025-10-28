@@ -10,6 +10,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
 import android.widget.Toast;
+
+import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -95,7 +97,7 @@ public class IntegratedAPI {
         final NoteRequest note;
         Long checksum = null;
         Long modelId = null;
-        boolean needsProcessing = false;
+        boolean duplicateCheck = false;
         CanAddWithError canAddWithError;
         List<Long> deckIds = new ArrayList<>();
         private NoteInfo(NoteRequest note) {
@@ -134,65 +136,56 @@ public class IntegratedAPI {
         }
 
         List<NoteInfo> noteInfos = new ArrayList<>(notes.size());
-        Set<Long> unprocessedChecksums = new HashSet<>();
+        Set<Long> checksums = new HashSet<>();
         for (NoteRequest note : notes) {
-            NoteInfo noteInfo = new NoteInfo(note);
+            NoteInfo noteInfo = validateNoteRequest(note, modelNameToId, deckNamesToIds);
             noteInfos.add(noteInfo);
-            NoteRequest.NoteOptions noteOptions = note.getOptions();
-
-            String modelName = note.getModelName();
-            if (modelName == null || modelName.isEmpty()) {
-                noteInfo.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_MODEL);
-                continue;
+            if (noteInfo.duplicateCheck) {
+                checksums.add(noteInfo.checksum);
             }
-
-            noteInfo.modelId = modelNameToId.get(modelName);
-            if (noteInfo.modelId == null) {
-                noteInfo.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_MODEL + modelName);
-                continue;
-            }
-
-            String deckName = noteOptions.getDeckName();
-            if (deckName == null) {
-                // Deck, not root
-                deckName = note.getDeckName();
-                if (deckName == null || deckName.isEmpty()) {
-                    noteInfo.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_DECK_NAME);
-                    continue;
-                }
-                noteInfo.deckIds.add(deckNamesToIds.get(deckName));
-            }
-            else {
-                for (String name : deckNamesToIds.keySet()) {
-                    if (name.contains(deckName)) {
-                        noteInfo.deckIds.add(deckNamesToIds.get(name));
-                    }
-                }
-            }
-
-            if (note.getFieldName() == null && note.getFieldValue() == null) {
-                noteInfo.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY);
-                continue;
-            }
-
-            noteInfo.checksum = Utility.getFieldChecksum(note.getFieldValue());
-
-            // If duplicates are allowed, just need to see if they are valid notes (checksum != 0)
-            if (noteOptions.isAllowDuplicate()) {
-                noteInfo.canAddWithError = (noteInfo.checksum == 0) ?
-                        new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN) : new CanAddWithError(true, null);
-                continue;
-            }
-
-            // Remaining notes need duplicate checking
-            noteInfo.needsProcessing = true;
-            unprocessedChecksums.add(noteInfo.checksum);
         }
 
-        if (unprocessedChecksums.isEmpty()) {
+        if (checksums.isEmpty()) {
             return noteInfos.stream().map(n -> n.canAddWithError).collect(Collectors.toList());
         }
 
+        Map<Long, Set<DuplicateNote>> duplicateNotes = getDuplicateNotes(checksums);
+
+        for (NoteInfo noteInfo : noteInfos) {
+            if (!noteInfo.duplicateCheck) {
+                continue;
+            }
+
+            duplicateCheck(noteInfo, duplicateNotes);
+        }
+
+        return noteInfos.stream().map(ninfo -> ninfo.canAddWithError).collect(Collectors.toList());
+    }
+
+    private void duplicateCheck(NoteInfo noteInfo, Map<Long, Set<DuplicateNote>> duplicateNotes) {
+        Set<DuplicateNote> duplicates = duplicateNotes.get(noteInfo.checksum);
+        if (duplicates == null) {
+            noteInfo.canAddWithError = new CanAddWithError(true, null);
+            return;
+        }
+
+        boolean hasDuplicate = false;
+        for (DuplicateNote duplicate : duplicates) {
+            // filter by model here instead of in query
+            boolean checkAllModels = noteInfo.note.getOptions().isCheckAllModels();
+            if (!checkAllModels && noteInfo.modelId != duplicate.mid) {
+                continue;
+            }
+
+            hasDuplicate = true;
+        }
+
+        noteInfo.canAddWithError = hasDuplicate ? new CanAddWithError(false, CAN_ADD_ERROR_DUPLICATE) : new CanAddWithError(true, null);
+
+        // todo: duplicateScope
+    }
+
+    private Map<Long, Set<DuplicateNote>> getDuplicateNotes(Set<Long> unprocessedChecksums) {
         final String[] NOTE_PROJECTION = {
                 FlashCardsContract.Note._ID,
                 FlashCardsContract.Note.CSUM,
@@ -234,35 +227,60 @@ public class IntegratedAPI {
         } catch (Exception e) {
             // todo: cancel batch?
         }
+        return duplicateNotes;
+    }
 
-        for (NoteInfo noteInfo : noteInfos) {
-            if (!noteInfo.needsProcessing) {
-                continue;
-            }
+    private NoteInfo validateNoteRequest(NoteRequest note, Map<String, Long> modelNameToId, Map<String, Long> deckNamesToIds) {
+        NoteInfo result = new NoteInfo(note);
+        NoteRequest.NoteOptions noteOptions = note.getOptions();
 
-            Set<DuplicateNote> duplicates = duplicateNotes.get(noteInfo.checksum);
-            if (duplicates == null) {
-                noteInfo.canAddWithError = new CanAddWithError(true, null);
-                continue;
-            }
-
-            boolean hasDuplicate = false;
-            for (DuplicateNote duplicate : duplicates) {
-                // filter by model here instead of in query
-                boolean checkAllModels = noteInfo.note.getOptions().isCheckAllModels();
-                if (!checkAllModels && noteInfo.modelId != duplicate.mid) {
-                    continue;
-                }
-
-                hasDuplicate = true;
-            }
-
-            noteInfo.canAddWithError = hasDuplicate ? new CanAddWithError(false, CAN_ADD_ERROR_DUPLICATE) : new CanAddWithError(true, null);
-
-            // todo: duplicateScope
+        String modelName = note.getModelName();
+        if (modelName == null || modelName.isEmpty()) {
+            result.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_MODEL);
+            return result;
         }
 
-        return noteInfos.stream().map(ninfo -> ninfo.canAddWithError).collect(Collectors.toList());
+        result.modelId = modelNameToId.get(modelName);
+        if (result.modelId == null) {
+            result.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_MODEL + modelName);
+            return result;
+        }
+
+        String deckName = noteOptions.getDeckName();
+        if (deckName == null) {
+            // Deck, not root
+            deckName = note.getDeckName();
+            if (deckName == null || deckName.isEmpty()) {
+                result.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_DECK_NAME);
+                return result;
+            }
+            result.deckIds.add(deckNamesToIds.get(deckName));
+        }
+        else {
+            for (String name : deckNamesToIds.keySet()) {
+                if (name.contains(deckName)) {
+                    result.deckIds.add(deckNamesToIds.get(name));
+                }
+            }
+        }
+
+        if (note.getFieldName() == null && note.getFieldValue() == null) {
+            result.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY);
+            return result;
+        }
+
+        result.checksum = Utility.getFieldChecksum(note.getFieldValue());
+
+        // If duplicates are allowed, just need to see if they are valid notes (checksum != 0)
+        if (noteOptions.isAllowDuplicate()) {
+            result.canAddWithError = (result.checksum == 0) ?
+                    new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN) : new CanAddWithError(true, null);
+            return result;
+        }
+
+        // Note needs duplicate checking
+        result.duplicateCheck = true;
+        return result;
     }
 
     /**
