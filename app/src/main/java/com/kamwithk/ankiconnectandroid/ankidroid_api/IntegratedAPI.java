@@ -73,163 +73,6 @@ public class IntegratedAPI {
         }
     }
 
-    private CanAddWithError canAddNoteCheck(NoteRequest note) throws Exception {
-        final String[] NOTE_PROJECTION = {
-                FlashCardsContract.Note._ID,
-                FlashCardsContract.Note.CSUM
-        };
-
-        NoteRequest.NoteOptions noteOptions = note.getOptions();
-        String modelName = note.getModelName();
-
-        if (modelName == null || modelName.isEmpty()) {
-            return new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_MODEL);
-        }
-
-        HashSet<Long> deckIds = new HashSet<>();
-        Map<String, Long> deckNamesToIds = deckAPI.deckNamesAndIds();
-        String deckName = noteOptions.getDeckName();
-
-        if (deckName == null) {
-            // Deck, not root
-            deckName = note.getDeckName();
-            if (deckName == null || deckName.isEmpty()) {
-                return new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_DECK_NAME);
-            }
-            deckIds.add(deckNamesToIds.get(deckName));
-        } else {
-            for (String name : deckNamesToIds.keySet()) {
-                if (name.contains(deckName)) {
-                    deckIds.add(deckNamesToIds.get(name));
-                }
-            }
-        }
-
-        // Ensure note has valid field name and field value
-        // If users have not set up any of the default card formats in Yomitan, these values will be null
-        if (note.getFieldName() == null && note.getFieldValue() == null) {
-            return new CanAddWithError(false, CAN_ADD_ERROR_EMPTY);
-        }
-
-        long checksum = Utility.getFieldChecksum(note.getFieldValue());
-
-        // If duplicates are allowed, just need to see if they are valid notes (checksum != 0)
-        if (noteOptions.isAllowDuplicate()) {
-            if (checksum == 0) {
-                return new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN);
-            }
-            return new CanAddWithError(true, null);
-        }
-
-        Map<String, Long> modelNameToId = modelAPI.modelNamesAndIds(0);
-        Long modelId = modelNameToId.get(modelName);
-
-        StringBuilder selectionQuery = new StringBuilder();
-        if (!noteOptions.isCheckAllModels()) {
-            selectionQuery.append(String.format(
-                    Locale.US,
-                    "%s = %d and ",
-                    FlashCardsContract.Note.MID,
-                    modelId
-            ));
-        }
-
-        selectionQuery.append(String.format(
-                Locale.US,
-                "%s = %d",
-                FlashCardsContract.Note.CSUM,
-                checksum
-        ));
-
-        try (Cursor cursor = context.getContentResolver().query(
-                FlashCardsContract.Note.CONTENT_URI_V2,
-                NOTE_PROJECTION,
-                selectionQuery.toString(),
-                null,
-                null
-        )) {
-            if (cursor != null && cursor.getCount() != 0) {
-                LinkedHashSet<Long> queryChecksums = findChecksumsInQuery(
-                        cursor,
-                        noteOptions.getDuplicateScope().equals("deck"),
-                        deckIds
-                );
-                if (queryChecksums.contains(checksum)) {
-                    return new CanAddWithError(false, CAN_ADD_ERROR_DUPLICATE);
-                }
-            }
-            return new CanAddWithError(true, null);
-        } catch (Exception e) {
-            return new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN);
-        }
-    }
-
-    private boolean canAddNote(NoteRequest note) {
-        try {
-            return canAddNoteCheck(note).isCanAdd();
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    public List<Boolean> canAddNotes(ArrayList<NoteRequest> notesToTest) {
-        return notesToTest.stream().map(this::canAddNote).collect(Collectors.toList());
-    }
-
-    private LinkedHashSet<Long> findChecksumsInQuery(Cursor cursor, boolean isDuplicateScopeDeck, Set<Long> deckIds) {
-        LinkedHashSet<Long> queryChecksums = new LinkedHashSet<>();
-
-        try (cursor) {
-            while (cursor.moveToNext()) {
-                // Build list of CSUM (queryChecksums)
-                // If an entry in queryChecksums is in checksums, then we have a duplicate
-                // If scope is "deck", these duplicates need to be checked again for the deck
-                int idIdx = cursor.getColumnIndexOrThrow(FlashCardsContract.Note._ID);
-                int csumIdx = cursor.getColumnIndexOrThrow(FlashCardsContract.Note.CSUM);
-
-                long queryNid = cursor.getLong(idIdx);
-                long queryCsum = cursor.getLong(csumIdx);
-
-                // If duplicate scope is "deck", need an additional query
-                if (!isDuplicateScopeDeck || isNoteInDeck(queryNid, deckIds)) {
-                    queryChecksums.add(queryCsum);
-                }
-            }
-        }
-
-        return queryChecksums;
-    }
-
-    private boolean isNoteInDeck(long noteId, Set<Long> deckIds) {
-        // Need to search for all cards with the same note ID, and see if they exist in one of the decks.
-        final String[] CARD_PROJECTION = {FlashCardsContract.Card.DECK_ID};
-
-        Uri noteUri = Uri.withAppendedPath(FlashCardsContract.Note.CONTENT_URI, Long.toString(noteId));
-        Uri cardUri = Uri.withAppendedPath(noteUri, "cards");
-        Cursor cardCursor = context.getContentResolver().query(
-                cardUri,
-                CARD_PROJECTION,
-                null,
-                null,
-                null
-        );
-
-        if(cardCursor != null) {
-            try (cardCursor) {
-                while(cardCursor.moveToNext()) {
-                    int didIdx = cardCursor.getColumnIndexOrThrow(FlashCardsContract.Card.DECK_ID);
-                    long did = cardCursor.getLong(didIdx);
-
-                    if (deckIds.contains(did)) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
     public static class CanAddWithError {
         private final boolean canAdd;
         private final String error;
@@ -248,16 +91,178 @@ public class IntegratedAPI {
         }
     }
 
-    private CanAddWithError canAddNoteWithErrorDetail(NoteRequest note) {
-        try {
-            return canAddNoteCheck(note);
-        } catch (Exception e) {
-            return new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN);
+    private static class NoteInfo {
+        final NoteRequest note;
+        Long checksum = null;
+        Long modelId = null;
+        boolean needsProcessing = false;
+        CanAddWithError canAddWithError;
+        List<Long> deckIds = new ArrayList<>();
+        private NoteInfo(NoteRequest note) {
+            this.note = note;
         }
     }
 
-    public List<CanAddWithError> canAddNotesWithErrorDetail(ArrayList<NoteRequest> notesToTest) {
-        return notesToTest.stream().map(this::canAddNoteWithErrorDetail).collect(Collectors.toList());
+    private static class DuplicateNote {
+        long id;
+        long mid;
+
+        private DuplicateNote(long id, long mid) {
+            this.id = id;
+            this.mid = mid;
+        }
+    }
+
+    public List<Boolean> canAddNotes(List<NoteRequest> notes) {
+        return canAddNotesWithErrorDetail(notes).stream().map(CanAddWithError::isCanAdd).collect(Collectors.toList());
+    }
+
+    public List<CanAddWithError> canAddNotesWithErrorDetail(List<NoteRequest> notes) {
+        if (notes == null || notes.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        Map<String, Long> deckNamesToIds;
+        Map<String, Long> modelNameToId;
+        try {
+            deckNamesToIds = deckAPI.deckNamesAndIds();
+            modelNameToId = modelAPI.modelNamesAndIds(0);
+        } catch (Exception e) {
+            ArrayList<CanAddWithError> err = new ArrayList<>();
+            notes.forEach(n -> err.add(new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN)));
+            return err;
+        }
+
+        List<NoteInfo> noteInfos = new ArrayList<>(notes.size());
+        Set<Long> unprocessedChecksums = new HashSet<>();
+        for (NoteRequest note : notes) {
+            NoteInfo noteInfo = new NoteInfo(note);
+            noteInfos.add(noteInfo);
+            NoteRequest.NoteOptions noteOptions = note.getOptions();
+
+            String modelName = note.getModelName();
+            if (modelName == null || modelName.isEmpty()) {
+                noteInfo.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_MODEL);
+                continue;
+            }
+
+            noteInfo.modelId = modelNameToId.get(modelName);
+            if (noteInfo.modelId == null) {
+                noteInfo.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_MODEL + modelName);
+                continue;
+            }
+
+            String deckName = noteOptions.getDeckName();
+            if (deckName == null) {
+                // Deck, not root
+                deckName = note.getDeckName();
+                if (deckName == null || deckName.isEmpty()) {
+                    noteInfo.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY_DECK_NAME);
+                    continue;
+                }
+                noteInfo.deckIds.add(deckNamesToIds.get(deckName));
+            }
+            else {
+                for (String name : deckNamesToIds.keySet()) {
+                    if (name.contains(deckName)) {
+                        noteInfo.deckIds.add(deckNamesToIds.get(name));
+                    }
+                }
+            }
+
+            if (note.getFieldName() == null && note.getFieldValue() == null) {
+                noteInfo.canAddWithError = new CanAddWithError(false, CAN_ADD_ERROR_EMPTY);
+                continue;
+            }
+
+            noteInfo.checksum = Utility.getFieldChecksum(note.getFieldValue());
+
+            // If duplicates are allowed, just need to see if they are valid notes (checksum != 0)
+            if (noteOptions.isAllowDuplicate()) {
+                noteInfo.canAddWithError = (noteInfo.checksum == 0) ?
+                        new CanAddWithError(false, CAN_ADD_ERROR_UNKNOWN) : new CanAddWithError(true, null);
+                continue;
+            }
+
+            // Remaining notes need duplicate checking
+            noteInfo.needsProcessing = true;
+            unprocessedChecksums.add(noteInfo.checksum);
+        }
+
+        if (unprocessedChecksums.isEmpty()) {
+            return noteInfos.stream().map(n -> n.canAddWithError).collect(Collectors.toList());
+        }
+
+        final String[] NOTE_PROJECTION = {
+                FlashCardsContract.Note._ID,
+                FlashCardsContract.Note.CSUM,
+                FlashCardsContract.Note.MID
+        };
+
+        String checksums = TextUtils.join(",", unprocessedChecksums);
+        String selection = String.format(
+                Locale.US,
+                "%s in (%s)",
+                FlashCardsContract.Note.CSUM,
+                checksums
+        );
+
+        // as a checksum can have multiple notes this has to be a map
+        Map<Long, Set<DuplicateNote>> duplicateNotes = new HashMap<>();
+        // this is basically findChecksumsInQuery, we collect all duplicate checksums for every checksum
+        try (Cursor cursor = context.getContentResolver().query(
+                FlashCardsContract.Note.CONTENT_URI_V2,
+                NOTE_PROJECTION,
+                selection,
+                null,
+                null
+        )) {
+            if (cursor != null) {
+                int idIdx = cursor.getColumnIndexOrThrow(FlashCardsContract.Note._ID);
+                int midIdx = cursor.getColumnIndexOrThrow(FlashCardsContract.Note.MID);
+                int csumIdx = cursor.getColumnIndexOrThrow(FlashCardsContract.Note.CSUM);
+
+                while (cursor.moveToNext()) {
+                    long id = cursor.getLong(idIdx);
+                    long mid = cursor.getLong(midIdx);
+                    long csum = cursor.getLong(csumIdx);
+
+                    Set<DuplicateNote> set = duplicateNotes.computeIfAbsent(csum, k -> new HashSet<>());
+                    set.add(new DuplicateNote(id, mid));
+                }
+            }
+        } catch (Exception e) {
+            // todo: cancel batch?
+        }
+
+        for (NoteInfo noteInfo : noteInfos) {
+            if (!noteInfo.needsProcessing) {
+                continue;
+            }
+
+            Set<DuplicateNote> duplicates = duplicateNotes.get(noteInfo.checksum);
+            if (duplicates == null) {
+                noteInfo.canAddWithError = new CanAddWithError(true, null);
+                continue;
+            }
+
+            boolean hasDuplicate = false;
+            for (DuplicateNote duplicate : duplicates) {
+                // filter by model here instead of in query
+                boolean checkAllModels = noteInfo.note.getOptions().isCheckAllModels();
+                if (!checkAllModels && noteInfo.modelId != duplicate.mid) {
+                    continue;
+                }
+
+                hasDuplicate = true;
+            }
+
+            noteInfo.canAddWithError = hasDuplicate ? new CanAddWithError(false, CAN_ADD_ERROR_DUPLICATE) : new CanAddWithError(true, null);
+
+            // todo: duplicateScope
+        }
+
+        return noteInfos.stream().map(ninfo -> ninfo.canAddWithError).collect(Collectors.toList());
     }
 
     /**
