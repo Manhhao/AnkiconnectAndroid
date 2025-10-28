@@ -105,7 +105,7 @@ public class IntegratedAPI {
             }
         }
 
-        // Ensure not has valid field name and field value
+        // Ensure note has valid field name and field value
         // If users have not set up any of the default card formats in Yomitan, these values will be null
         if (note.getFieldName() == null && note.getFieldValue() == null) {
             return new CanAddWithError(false, CAN_ADD_ERROR_EMPTY);
