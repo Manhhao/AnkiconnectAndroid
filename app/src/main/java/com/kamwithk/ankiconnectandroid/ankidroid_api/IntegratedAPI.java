@@ -99,7 +99,7 @@ public class IntegratedAPI {
         Long modelId = null;
         boolean duplicateCheck = false;
         CanAddWithError canAddWithError;
-        List<Long> deckIds = new ArrayList<>();
+        Set<Long> deckIds = new HashSet<>();
         private NoteInfo(NoteRequest note) {
             this.note = note;
         }
@@ -169,20 +169,28 @@ public class IntegratedAPI {
             return;
         }
 
+        boolean isDeckScope = noteInfo.note.getOptions().getDuplicateScope().equals("deck");
+        boolean checkAllModels = noteInfo.note.getOptions().isCheckAllModels();
         boolean hasDuplicate = false;
         for (DuplicateNote duplicate : duplicates) {
             // filter by model here instead of in query
-            boolean checkAllModels = noteInfo.note.getOptions().isCheckAllModels();
             if (!checkAllModels && noteInfo.modelId != duplicate.mid) {
                 continue;
             }
 
-            hasDuplicate = true;
+            if (isDeckScope) {
+                if (isNoteInDeck(duplicate.id, noteInfo.deckIds)) {
+                    hasDuplicate = true;
+                    break;
+                }
+            }
+            else {
+                hasDuplicate = true;
+                break;
+            }
         }
 
         noteInfo.canAddWithError = hasDuplicate ? new CanAddWithError(false, CAN_ADD_ERROR_DUPLICATE) : new CanAddWithError(true, null);
-
-        // todo: duplicateScope
     }
 
     private Map<Long, Set<DuplicateNote>> getDuplicateNotes(Set<Long> unprocessedChecksums) {
@@ -202,7 +210,7 @@ public class IntegratedAPI {
 
         // as a checksum can have multiple notes this has to be a map
         Map<Long, Set<DuplicateNote>> duplicateNotes = new HashMap<>();
-        // this is basically findChecksumsInQuery, we collect all duplicate checksums for every checksum
+        // this is basically findChecksumsInQuery, we collect all duplicate notes for each checksum
         try (Cursor cursor = context.getContentResolver().query(
                 FlashCardsContract.Note.CONTENT_URI_V2,
                 NOTE_PROJECTION,
@@ -283,6 +291,35 @@ public class IntegratedAPI {
         return result;
     }
 
+    private boolean isNoteInDeck(long noteId, Set<Long> deckIds) {
+        // Need to search for all cards with the same note ID, and see if they exist in one of the decks.
+        final String[] CARD_PROJECTION = {FlashCardsContract.Card.DECK_ID};
+
+        Uri noteUri = Uri.withAppendedPath(FlashCardsContract.Note.CONTENT_URI, Long.toString(noteId));
+        Uri cardUri = Uri.withAppendedPath(noteUri, "cards");
+        Cursor cardCursor = context.getContentResolver().query(
+                cardUri,
+                CARD_PROJECTION,
+                null,
+                null,
+                null
+        );
+
+        if(cardCursor != null) {
+            try (cardCursor) {
+                while(cardCursor.moveToNext()) {
+                    int didIdx = cardCursor.getColumnIndexOrThrow(FlashCardsContract.Card.DECK_ID);
+                    long did = cardCursor.getLong(didIdx);
+
+                    if (deckIds.contains(did)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
     /**
      * Add flashcards to AnkiDroid through instant add API
      * @param data Map of (field name, field value) pairs
